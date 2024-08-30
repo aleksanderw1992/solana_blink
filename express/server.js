@@ -20,6 +20,8 @@ const BASE_URL = `http://localhost:${PORT}`;
 // Express app setup
 const app = express();
 app.use(express.json());
+// available at http://localhost:8080/static/board_1.jpg
+app.use('/static', express.static('jpges'))
 
 /**
  * The `actionCorsMiddleware` middleware will provide the correct CORS settings for Action APIs
