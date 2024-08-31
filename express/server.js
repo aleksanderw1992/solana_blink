@@ -22,6 +22,7 @@ const app = express();
 app.use(express.json());
 // available at http://localhost:8080/static/board_1.jpg
 app.use('/static', express.static('jpges'))
+let index = 0;
 
 /**
  * The `actionCorsMiddleware` middleware will provide the correct CORS settings for Action APIs
@@ -50,28 +51,28 @@ async function getTransferSol(req, res) {
     const { toPubkey } = validatedQueryParams(req.query);
     const baseHref = `${BASE_URL}/api/actions/transfer-sol?to=${toPubkey.toBase58()}`;
 
+    let actions = [
+      { label: "Send 0.01 SOL", href: `${baseHref}&amount=0.01` },
+      { label: "Send 0.05 SOL", href: `${baseHref}&amount=0.05` },
+      { label: "Send 0.1 SOL", href: `${baseHref}&amount=0.1` },
+    ];
+    if((index+1)%10 ==0) {
+      actions.push(
+      { label: "Send 0.01 SOL and distribute 50% of vault to one of users", href: `${baseHref}&amount=0.01&distribute=true` },
+      { label: "Send 0.05 SOL and distribute 50% of vault to one of users", href: `${baseHref}&amount=0.05&distribute=true` },
+      { label: "Send 0.1 SOL and distribute 50% of vault to one of users", href: `${baseHref}&amount=0.1&distribute=true` },)
+    }
+    // reset will occur very rare and no more than once every 10 games
+    if(index==2) {
+      actions.push({ label: "Reset for 0.1 fee", href: `${baseHref}&amount=0.01&reset=true` });
+    }
     const payload = {
       type: "action",
       title: "Actions Example - Transfer Native SOL",
-      icon: "https://solana-actions.vercel.app/solana_devs.jpg",
+      icon: `${BASE_URL}/static/board_${index+1}.jpg`,
       description: "Transfer SOL to another Solana wallet",
       links: {
-        actions: [
-          { label: "Send 1 SOL", href: `${baseHref}&amount=1` },
-          { label: "Send 5 SOL", href: `${baseHref}&amount=5` },
-          { label: "Send 10 SOL", href: `${baseHref}&amount=10` },
-          {
-            label: "Send SOL",
-            href: `${baseHref}&amount={amount}`,
-            parameters: [
-              {
-                name: "amount",
-                label: "Enter the amount of SOL to send",
-                required: true,
-              },
-            ],
-          },
-        ],
+        actions: actions,
       },
     };
 
@@ -85,9 +86,9 @@ async function getTransferSol(req, res) {
 
 async function postTransferSol(req, res) {
   try {
-    const { amount, toPubkey } = validatedQueryParams(req.query);
+    const { amount, toPubkey, distribute, reset } = validatedQueryParams(req.query);
     const { account } = req.body;
-
+debugger;
     if (!account) {
       throw new Error('Invalid "account" provided');
     }
@@ -97,6 +98,7 @@ async function postTransferSol(req, res) {
       0,
     );
 
+    console.log('amount, actual, distribute, reset', amount, amount * LAMPORTS_PER_SOL, distribute, reset)
     if (amount * LAMPORTS_PER_SOL < minimumBalance) {
       throw new Error(`Account may not be rent exempt: ${toPubkey.toBase58()}`);
     }
@@ -137,6 +139,12 @@ async function postTransferSol(req, res) {
       // signers: [],
     });
 
+    index++;
+    if(distribute) {
+      console.log("distributing 50% of current stacked sol to one of users")
+    }if(reset) {
+      index = 0;
+    }
     res.json(payload);
   } catch (err) {
     res.status(400).json({ error: err.message || "An unknown error occurred" });
@@ -146,7 +154,7 @@ async function postTransferSol(req, res) {
 function validatedQueryParams(query) {
   let toPubkey = DEFAULT_SOL_ADDRESS;
   let amount = DEFAULT_SOL_AMOUNT;
-
+  console.log('validatedQueryParams', query)
   if (query.to) {
     try {
       toPubkey = new PublicKey(query.to);
@@ -163,8 +171,9 @@ function validatedQueryParams(query) {
   } catch (err) {
     throw new Error("Invalid input query parameter: amount");
   }
-
-  return { amount, toPubkey };
+  let distribute = query.distribute ? query.distribute === 'true': false;
+  let reset = query.reset ? query.reset === 'true': false;
+  return { amount, toPubkey, distribute, reset };
 }
 
 // Start server
