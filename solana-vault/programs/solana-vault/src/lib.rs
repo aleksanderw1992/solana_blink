@@ -1,7 +1,8 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{self, clock::Clock, hash::hash};
+use anchor_lang::solana_program::sysvar::rent::Rent;
+use anchor_lang::solana_program::system_instruction::transfer;
 use std::collections::VecDeque;
-
 declare_id!("AH4vTxcx557pVqWXsdXp9mqxb73SayXrb1gf9ugbWp9W");
 
 #[program]
@@ -54,31 +55,81 @@ pub mod solana_vault {
         Ok(())
     }
 
-    pub fn distribute_50(ctx: Context<Distribute>) -> Result<()> {
-        let vault = &mut ctx.accounts.vault;
+pub fn distribute_50(ctx: Context<Distribute>) -> Result<()> {
+    let vault = &mut ctx.accounts.vault;
+    let rent = Rent::get()?;
 
-        let winner = select_winner(&vault.contributors)?;
-
-        // Send 50% of the vault to the winner
-        let amount_to_distribute = vault.total_sol / 2;
-        vault.total_sol -= amount_to_distribute;
-        **ctx.accounts.winner.try_borrow_mut_lamports()? += amount_to_distribute;
-
-        Ok(())
+    // Ensure vault has sufficient balance
+    if vault.total_sol == 0 {
+        return Err(error!(ErrorCode::NoWinner));
     }
 
-    pub fn distribute_100(ctx: Context<Distribute>) -> Result<()> {
-        let vault = &mut ctx.accounts.vault;
+    let amount_to_distribute = vault.total_sol / 2;
 
-        let winner = select_winner(&vault.contributors)?;
+    // Get the winner's public key before any mutable borrow occurs
+    let winner_key = ctx.accounts.winner.key();
+    let winner_lamports = **ctx.accounts.winner.try_borrow_lamports()?;
 
-        // Send 100% of the vault to the winner
-        let amount_to_distribute = vault.total_sol;
-        vault.total_sol = 0;
-        **ctx.accounts.winner.try_borrow_mut_lamports()? += amount_to_distribute;
-
-        Ok(())
+    // Ensure the winner remains rent-exempt after receiving SOL
+    let minimum_balance = rent.minimum_balance(ctx.accounts.winner.data_len());
+    if winner_lamports + amount_to_distribute < minimum_balance {
+        return Err(ProgramError::InsufficientFunds.into());
     }
+
+    // Transfer 50% of the vault to the winner
+    vault.total_sol -= amount_to_distribute;
+    **ctx.accounts.winner.try_borrow_mut_lamports()? += amount_to_distribute;
+
+    let transfer_ix = transfer(
+        &ctx.accounts.vault.key(),
+        &winner_key, // Use pre-extracted winner public key
+        amount_to_distribute,
+    );
+    anchor_lang::solana_program::program::invoke(
+        &transfer_ix,
+        &[ctx.accounts.vault.to_account_info(), ctx.accounts.winner.to_account_info()],
+    )?;
+
+    Ok(())
+}
+
+pub fn distribute_100(ctx: Context<Distribute>) -> Result<()> {
+    let vault = &mut ctx.accounts.vault;
+    let rent = Rent::get()?;
+
+    // Ensure vault has sufficient balance
+    if vault.total_sol == 0 {
+        return Err(error!(ErrorCode::NoWinner));
+    }
+
+    let amount_to_distribute = vault.total_sol;
+
+    // Get the winner's public key before any mutable borrow occurs
+    let winner_key = ctx.accounts.winner.key();
+    let winner_lamports = **ctx.accounts.winner.try_borrow_lamports()?;
+
+    // Ensure the winner remains rent-exempt after receiving SOL
+    let minimum_balance = rent.minimum_balance(ctx.accounts.winner.data_len());
+    if winner_lamports + amount_to_distribute < minimum_balance {
+        return Err(ProgramError::InsufficientFunds.into());
+    }
+
+    // Transfer 100% of the vault to the winner
+    vault.total_sol = 0;
+    **ctx.accounts.winner.try_borrow_mut_lamports()? += amount_to_distribute;
+
+    let transfer_ix = transfer(
+        &ctx.accounts.vault.key(),
+        &winner_key, // Use pre-extracted winner public key
+        amount_to_distribute,
+    );
+    anchor_lang::solana_program::program::invoke(
+        &transfer_ix,
+        &[ctx.accounts.vault.to_account_info(), ctx.accounts.winner.to_account_info()],
+    )?;
+
+    Ok(())
+}
 
     pub fn check_vault(ctx: Context<CheckVault>) -> Result<()> {
         let vault = &ctx.accounts.vault;
