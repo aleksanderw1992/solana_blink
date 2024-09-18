@@ -3,7 +3,8 @@ import {
   Connection,
   Keypair,
   PublicKey,
-  SystemProgram,
+  // SystemProgram,
+  TransactionInstruction,
   Transaction,
   clusterApiUrl,
   LAMPORTS_PER_SOL,
@@ -84,72 +85,102 @@ async function getTransferSol(req, res) {
   }
 }
 
+const PROGRAM_ID = new PublicKey("AH4vTxcx557pVqWXsdXp9mqxb73SayXrb1gf9ugbWp9W");
+const VAULT_PUBKEY = new PublicKey("CpSBsBdSB53d8cVs1GePTVPJp6Ejxzx6wWRng6p8zdGn");
+
 async function postTransferSol(req, res) {
   try {
     const { amount, toPubkey, distribute, reset } = validatedQueryParams(req.query);
     const { account } = req.body;
-debugger;
+
     if (!account) {
       throw new Error('Invalid "account" provided');
     }
 
     const fromPubkey = new PublicKey(account);
-    const minimumBalance = await connection.getMinimumBalanceForRentExemption(
-      0,
-    );
+    const minimumBalance = await connection.getMinimumBalanceForRentExemption(0);
 
-    console.log('amount, actual, distribute, reset', amount, amount * LAMPORTS_PER_SOL, distribute, reset)
+    console.log('amount, actual, distribute, reset', amount, amount * LAMPORTS_PER_SOL, distribute, reset);
     if (amount * LAMPORTS_PER_SOL < minimumBalance) {
       throw new Error(`Account may not be rent exempt: ${toPubkey.toBase58()}`);
     }
 
-    // create an instruction to transfer native SOL from one wallet to another
-    const transferSolInstruction = SystemProgram.transfer({
-      fromPubkey: fromPubkey,
-      toPubkey: toPubkey,
-      lamports: amount * LAMPORTS_PER_SOL,
-    });
+    if (reset) {
+      index = 0; // Reset the index without calling the contract
+      return res.json({ message: "Index reset to 0" });
+    }
 
-    const { blockhash, lastValidBlockHeight } =
-      await connection.getLatestBlockhash();
+    let transaction;
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
 
-    // create a legacy transaction
-    const transaction = new Transaction({
-      feePayer: fromPubkey,
-      blockhash,
-      lastValidBlockHeight,
-    }).add(transferSolInstruction);
-
-    // versioned transactions are also supported
-    // const transaction = new VersionedTransaction(
-    //   new TransactionMessage({
-    //     payerKey: fromPubkey,
-    //     recentBlockhash: blockhash,
-    //     instructions: [transferSolInstruction],
-    //   }).compileToV0Message(),
-    //   // note: you can also use `compileToLegacyMessage`
-    // );
+    if (distribute) {
+      // Call `distribute_50` from the Solana program
+      console.log("Distributing 50% of the vault");
+      transaction = new Transaction({
+        feePayer: fromPubkey,
+        blockhash,
+        lastValidBlockHeight,
+      }).add(
+        new TransactionInstruction({
+          programId: PROGRAM_ID, // Use the constant program ID
+          keys: [
+            { pubkey: VAULT_PUBKEY, isSigner: false, isWritable: true }, // Vault account
+            { pubkey: fromPubkey, isSigner: true, isWritable: true }, // Sender who is also the winner
+          ],
+          data: Buffer.from([1]), // Call `distribute_50` (this instruction will correspond to the `distribute_50` method)
+        })
+      );
+    } else if (index === 99) {
+      // Call `distribute_100` from the Solana program
+      console.log("Distributing 100% of the vault");
+      transaction = new Transaction({
+        feePayer: fromPubkey,
+        blockhash,
+        lastValidBlockHeight,
+      }).add(
+        new TransactionInstruction({
+          programId: PROGRAM_ID,
+          keys: [
+            { pubkey: VAULT_PUBKEY, isSigner: false, isWritable: true }, // Vault account
+            { pubkey: fromPubkey, isSigner: true, isWritable: true }, // Sender who is also the winner
+          ],
+          data: Buffer.from([2]), // Call `distribute_100` (this instruction will correspond to the `distribute_100` method)
+        })
+      );
+    } else {
+      // Call `deposit_sol` from the Solana program (default action)
+      console.log("Depositing SOL to the vault");
+      transaction = new Transaction({
+        feePayer: fromPubkey,
+        blockhash,
+        lastValidBlockHeight,
+      }).add(
+        new TransactionInstruction({
+          programId: PROGRAM_ID,
+          keys: [
+            { pubkey: VAULT_PUBKEY, isSigner: false, isWritable: true }, // Vault account
+            { pubkey: fromPubkey, isSigner: true, isWritable: true }, // Sender
+          ],
+          data: Buffer.from([0, ...new Uint8Array(new BN(amount).toArray("le", 8))]),
+          // Call `deposit_sol` with the amount
+        })
+      );
+    }
 
     const payload = await createPostResponse({
       fields: {
         transaction,
-        message: `Send ${amount} SOL to ${toPubkey.toBase58()}`,
+        message: `Processed ${distribute ? "distribute" : "deposit"} action`,
       },
-      // note: no additional signers are needed
-      // signers: [],
     });
 
     index++;
-    if(distribute) {
-      console.log("distributing 50% of current stacked sol to one of users")
-    }if(reset) {
-      index = 0;
-    }
     res.json(payload);
   } catch (err) {
     res.status(400).json({ error: err.message || "An unknown error occurred" });
   }
 }
+
 
 function validatedQueryParams(query) {
   let toPubkey = DEFAULT_SOL_ADDRESS;
