@@ -56,7 +56,7 @@ async function getTransferSol(req, res) {
       { label: "Send 0.05 SOL", href: `${baseHref}&amount=0.05` },
       { label: "Send 0.1 SOL", href: `${baseHref}&amount=0.1` },
     ];
-    if((index+1)%10 ==0) {
+    if((index+1)%10 ==0 && (index+1 != 100)) {
       actions.push(
       { label: "Send 0.01 SOL and distribute 50% of vault to one of users", href: `${baseHref}&amount=0.01&distribute=true` },
       { label: "Send 0.05 SOL and distribute 50% of vault to one of users", href: `${baseHref}&amount=0.05&distribute=true` },
