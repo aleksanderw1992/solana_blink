@@ -1,8 +1,6 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{self, clock::Clock, hash::hash};
-use anchor_lang::solana_program::sysvar::rent::Rent;
-use anchor_lang::solana_program::system_instruction::transfer;
-use std::collections::VecDeque;
+use anchor_lang::solana_program::{hash::hash, system_instruction};
+
 declare_id!("AH4vTxcx557pVqWXsdXp9mqxb73SayXrb1gf9ugbWp9W");
 
 #[program]
@@ -11,155 +9,186 @@ pub mod solana_vault {
 
     pub fn initialize(ctx: Context<InitializeVault>) -> Result<()> {
         let vault = &mut ctx.accounts.vault;
+        vault.bump = ctx.bumps.vault;
         vault.total_sol = 0;
-        vault.contributors = Vec::new(); // Initialize empty vector
+        vault.contributors = Vec::new();
+        msg!("Vault initialized with bump {}", vault.bump);
         Ok(())
     }
 
     pub fn deposit_sol(ctx: Context<DepositSol>, amount: u64) -> Result<()> {
+        let user = &ctx.accounts.user;
         let vault = &mut ctx.accounts.vault;
-        let contributor = ctx.accounts.user.key();
+        msg!("Depositing SOL, vault bump is {}", vault.bump);
 
-        // Record the SOL sent and update the vault
+        // Transfer SOL from user to vault PDA
+        let ix = system_instruction::transfer(
+            &user.key(),
+            &vault.key(),
+            amount,
+        );
+        anchor_lang::solana_program::program::invoke(
+            &ix,
+            &[
+                user.to_account_info(),
+                vault.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+
+        // Update vault state
         vault.total_sol += amount;
 
-        let mut found = false;
-        for contrib in &mut vault.contributors {
-            if contrib.address == contributor {
-                contrib.amount += amount;
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
+        // Update contributors list
+        let contributor_pubkey = user.key();
+        if let Some(contributor) = vault.contributors.iter_mut().find(|c| c.address == contributor_pubkey) {
+            contributor.amount += amount;
+        } else {
             vault.contributors.push(Contributor {
-                address: contributor,
+                address: contributor_pubkey,
                 amount,
             });
         }
 
-        // Transfer SOL to the vault
-        let ix = solana_program::system_instruction::transfer(
-            &ctx.accounts.user.key(),
-            &ctx.accounts.vault.key(),
-            amount,
-        );
-        solana_program::program::invoke(
-            &ix,
-            &[
-                ctx.accounts.user.to_account_info(),
-                ctx.accounts.vault.to_account_info(),
-            ],
-        )?;
+        // Log the contribution
+        msg!("Deposit: {} contributed {} lamports", contributor_pubkey, amount);
+
         Ok(())
     }
 
-pub fn distribute_50(ctx: Context<Distribute>) -> Result<()> {
-    let vault = &mut ctx.accounts.vault;
-    let rent = Rent::get()?;
+    pub fn distribute_50(ctx: Context<Distribute>) -> Result<()> {
+        let vault = &mut ctx.accounts.vault;
 
-    // Ensure vault has sufficient balance
-    if vault.total_sol == 0 {
-        return Err(error!(ErrorCode::NoWinner));
+        if vault.total_sol == 0 {
+            return Err(ErrorCode::VaultEmpty.into());
+        }
+
+        let amount_to_distribute = vault.total_sol / 2;
+
+        // Select a winner based on weighted contributions
+        let winner_pubkey = select_winner(&vault.contributors)?;
+        msg!("Winner selected: {}", winner_pubkey);
+
+        // Log the probabilities
+        log_probabilities(&vault.contributors)?;
+
+        // Transfer SOL from vault to winner
+        let ix = system_instruction::transfer(
+            &vault.key(),
+            &winner_pubkey,
+            amount_to_distribute,
+        );
+        let vault_seeds = &[b"vault".as_ref(), &[vault.bump]];
+        anchor_lang::solana_program::program::invoke_signed(
+            &ix,
+            &[
+                vault.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+            &[vault_seeds],
+        )?;
+
+        // Update vault state
+        vault.total_sol -= amount_to_distribute;
+
+        // Log the distribution
+        msg!(
+            "Distributed {} lamports to winner: {}",
+            amount_to_distribute,
+            winner_pubkey
+        );
+
+        Ok(())
     }
 
-    let amount_to_distribute = vault.total_sol / 2;
+    pub fn distribute_100(ctx: Context<Distribute>) -> Result<()> {
+        let vault = &mut ctx.accounts.vault;
 
-    // Get the winner's public key before any mutable borrow occurs
-    let winner_key = ctx.accounts.winner.key();
-    let winner_lamports = **ctx.accounts.winner.try_borrow_lamports()?;
+        if vault.total_sol == 0 {
+            return Err(ErrorCode::VaultEmpty.into());
+        }
 
-    // Ensure the winner remains rent-exempt after receiving SOL
-    let minimum_balance = rent.minimum_balance(ctx.accounts.winner.data_len());
-    if winner_lamports + amount_to_distribute < minimum_balance {
-        return Err(ProgramError::InsufficientFunds.into());
+        let amount_to_distribute = vault.total_sol;
+
+        // Select a winner based on weighted contributions
+        let winner_pubkey = select_winner(&vault.contributors)?;
+        msg!("Winner selected: {}", winner_pubkey);
+
+        // Log the probabilities
+        log_probabilities(&vault.contributors)?;
+
+        // Transfer SOL from vault to winner
+        let ix = system_instruction::transfer(
+            &vault.key(),
+            &winner_pubkey,
+            amount_to_distribute,
+        );
+        let vault_seeds = &[b"vault".as_ref(), &[vault.bump]];
+        anchor_lang::solana_program::program::invoke_signed(
+            &ix,
+            &[
+                vault.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+            &[vault_seeds],
+        )?;
+
+        // Reset vault state
+        vault.total_sol = 0;
+
+        // Log the distribution
+        msg!(
+            "Distributed {} lamports to winner: {}",
+            amount_to_distribute,
+            winner_pubkey
+        );
+
+        Ok(())
     }
-
-    // Transfer 50% of the vault to the winner
-    vault.total_sol -= amount_to_distribute;
-    **ctx.accounts.winner.try_borrow_mut_lamports()? += amount_to_distribute;
-
-    let transfer_ix = transfer(
-        &ctx.accounts.vault.key(),
-        &winner_key, // Use pre-extracted winner public key
-        amount_to_distribute,
-    );
-    anchor_lang::solana_program::program::invoke(
-        &transfer_ix,
-        &[ctx.accounts.vault.to_account_info(), ctx.accounts.winner.to_account_info()],
-    )?;
-
-    Ok(())
-}
-
-pub fn distribute_100(ctx: Context<Distribute>) -> Result<()> {
-    let vault = &mut ctx.accounts.vault;
-    let rent = Rent::get()?;
-
-    // Ensure vault has sufficient balance
-    if vault.total_sol == 0 {
-        return Err(error!(ErrorCode::NoWinner));
-    }
-
-    let amount_to_distribute = vault.total_sol;
-
-    // Get the winner's public key before any mutable borrow occurs
-    let winner_key = ctx.accounts.winner.key();
-    let winner_lamports = **ctx.accounts.winner.try_borrow_lamports()?;
-
-    // Ensure the winner remains rent-exempt after receiving SOL
-    let minimum_balance = rent.minimum_balance(ctx.accounts.winner.data_len());
-    if winner_lamports + amount_to_distribute < minimum_balance {
-        return Err(ProgramError::InsufficientFunds.into());
-    }
-
-    // Transfer 100% of the vault to the winner
-    vault.total_sol = 0;
-    **ctx.accounts.winner.try_borrow_mut_lamports()? += amount_to_distribute;
-
-    let transfer_ix = transfer(
-        &ctx.accounts.vault.key(),
-        &winner_key, // Use pre-extracted winner public key
-        amount_to_distribute,
-    );
-    anchor_lang::solana_program::program::invoke(
-        &transfer_ix,
-        &[ctx.accounts.vault.to_account_info(), ctx.accounts.winner.to_account_info()],
-    )?;
-
-    Ok(())
-}
 
     pub fn check_vault(ctx: Context<CheckVault>) -> Result<()> {
         let vault = &ctx.accounts.vault;
         msg!("Total SOL in Vault: {}", vault.total_sol);
 
         for contrib in &vault.contributors {
-            msg!("Contributor Address: {}, Contribution: {}", contrib.address, contrib.amount);
+            msg!(
+                "Contributor: {}, Amount: {} lamports",
+                contrib.address,
+                contrib.amount
+            );
         }
+
+        // Log the probabilities
+        log_probabilities(&vault.contributors)?;
 
         Ok(())
     }
 }
 
-// Data structures
+// Data Structures
 #[account]
 pub struct Vault {
+    pub bump: u8,
     pub total_sol: u64,
-    pub contributors: Vec<Contributor>, // List of contributors
+    pub contributors: Vec<Contributor>,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct Contributor {
     pub address: Pubkey,
     pub amount: u64,
 }
 
-// Context structs
+// Contexts
 #[derive(Accounts)]
 pub struct InitializeVault<'info> {
-    #[account(init, payer = user, space = 8 + 64 + (32 + 8) * 100)] // Allocate space for 100 contributors
+    #[account(
+        init,
+        payer = user,
+        space = 8 + 1 + 8 + 4 + (40 * 100), // 8 for discriminator, 1 for bump, 8 for total_sol, 4 for vec length, 40 per contributor (32+8)
+        seeds = [b"vault"],
+        bump,
+    )]
     pub vault: Account<'info, Vault>,
     #[account(mut)]
     pub user: Signer<'info>,
@@ -168,7 +197,7 @@ pub struct InitializeVault<'info> {
 
 #[derive(Accounts)]
 pub struct DepositSol<'info> {
-    #[account(mut)]
+    #[account(mut, seeds = [b"vault"], bump = vault.bump)]
     pub vault: Account<'info, Vault>,
     #[account(mut)]
     pub user: Signer<'info>,
@@ -177,58 +206,75 @@ pub struct DepositSol<'info> {
 
 #[derive(Accounts)]
 pub struct Distribute<'info> {
-    #[account(mut)]
+    #[account(mut, seeds = [b"vault"], bump = vault.bump)]
     pub vault: Account<'info, Vault>,
-    #[account(mut)]
-    pub winner: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
 pub struct CheckVault<'info> {
+    #[account(seeds = [b"vault"], bump = vault.bump)]
     pub vault: Account<'info, Vault>,
 }
 
-// Error handling
+// Error Codes
 #[error_code]
 pub enum ErrorCode {
-    #[msg("No winner found")]
-    NoWinner,
+    #[msg("The vault is empty.")]
+    VaultEmpty,
 }
 
-// Winner selection based on blockhash randomness
+// Helper Functions
 fn select_winner(contributors: &Vec<Contributor>) -> Result<Pubkey> {
-    if contributors.is_empty() {
-        return Err(ErrorCode::NoWinner.into());
+    let total_contribution: u64 = contributors.iter().map(|c| c.amount).sum();
+
+    if total_contribution == 0 {
+        return Err(ErrorCode::VaultEmpty.into());
     }
 
-    // Get the current block timestamp as a source of randomness
-    let current_timestamp = Clock::get()?.unix_timestamp;
+    // Get a random seed from the recent blockhash
+    let clock = Clock::get()?;
+    let seed = clock.unix_timestamp as u64;
 
-    // Create a hash from the current timestamp
-    let hash_result = hash(&current_timestamp.to_be_bytes());
+    // Create a weighted distribution
+    let mut cumulative_weights = Vec::new();
+    let mut cumulative = 0u64;
+    for c in contributors {
+        cumulative += c.amount;
+        cumulative_weights.push((c.address, cumulative));
+    }
 
-    // Convert the hash result into a large integer for random selection
-    let random_number = u64::from_le_bytes(hash_result.to_bytes()[..8].try_into().unwrap());
+    // Generate a random number between 0 and total_contribution
+    let hash_input = seed.to_le_bytes();
+    let hash = hash(&hash_input);
+    let random_number = u64::from_le_bytes(hash.to_bytes()[..8].try_into().unwrap()) % total_contribution;
 
-    // Sort contributors by amount in descending order
-    let mut sorted_contributors = contributors.clone();
-    sorted_contributors.sort_by(|a, b| b.amount.cmp(&a.amount));
-
-    // Calculate weighted chances based on their contributions
-    let total_contributors = sorted_contributors.len();
-    let mut weighted_contributors: VecDeque<Pubkey> = VecDeque::new();
-
-    let mut weight = total_contributors as u64;
-    for contrib in sorted_contributors.iter() {
-        let chances = if weight > 0 { weight } else { 1 };
-        for _ in 0..chances {
-            weighted_contributors.push_back(contrib.address);
+    // Find the winner based on the random number
+    for (address, weight) in cumulative_weights {
+        if random_number < weight {
+            return Ok(address);
         }
-        weight /= 2; // Reduce the chances by half for the next contributor
     }
 
-    // Select a winner based on the random number and the weighted contributors
-    let winner_index = (random_number as usize) % weighted_contributors.len();
-    Ok(weighted_contributors[winner_index])
+    // Fallback
+    Ok(contributors.last().unwrap().address)
+}
+
+fn log_probabilities(contributors: &Vec<Contributor>) -> Result<()> {
+    let total_contribution: u64 = contributors.iter().map(|c| c.amount).sum();
+
+    if total_contribution == 0 {
+        return Ok(());
+    }
+
+    for c in contributors {
+        let probability = (c.amount as f64 / total_contribution as f64) * 100.0;
+        msg!(
+            "Contributor: {}, Probability: {:.2}%",
+            c.address,
+            probability
+        );
+    }
+
+    Ok(())
 }
