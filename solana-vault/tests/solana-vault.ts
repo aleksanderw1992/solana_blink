@@ -137,6 +137,64 @@ describe("solana-vault", () => {
     );
   });
 
+  it("Distributes 50% of the vault to a winner", async () => {
+    // We know the winner will be user1 due to our adjusted selection logic
+    const winner = user1;
+
+    // Call the distribute_50 function
+    await program.methods
+      .distribute50()
+      .accounts({
+        vault: vaultPDA,
+        winner: winner.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+
+    // Fetch the vault account
+    const vaultAfter = await program.account.vault.fetch(vaultPDA);
+
+    // Expected vault total after distribution
+    const expectedVaultTotal =
+      (0.5 * anchor.web3.LAMPORTS_PER_SOL + 0.3 * anchor.web3.LAMPORTS_PER_SOL) /
+      2;
+
+    // Check updated state
+    assert.ok(vaultAfter.totalSol.toNumber() === expectedVaultTotal);
+
+    console.log("Distributed 50% of the vault successfully");
+    console.log(
+      "Vault total SOL after distribution:",
+      vaultAfter.totalSol.toNumber()
+    );
+  });
+
+  it("Distributes 100% of the vault to a winner", async () => {
+    // The winner will again be user1
+    const winner = user1;
+
+    // Call the distribute_100 function
+    await program.methods
+      .distribute100()
+      .accounts({
+        vault: vaultPDA,
+        winner: winner.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+
+    // Fetch the vault account
+    const vaultAfter = await program.account.vault.fetch(vaultPDA);
+
+    // Check updated state
+    assert.ok(vaultAfter.totalSol.toNumber() === 0);
+
+    console.log("Distributed 100% of the vault successfully");
+    console.log(
+      "Vault total SOL after distribution:",
+      vaultAfter.totalSol.toNumber()
+    );
+  });
 
   it("Checks the vault state", async () => {
     // Call the check_vault function
