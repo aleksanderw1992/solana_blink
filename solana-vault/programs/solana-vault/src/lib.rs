@@ -204,7 +204,6 @@ pub struct DepositSol<'info> {
 pub struct Distribute<'info> {
     #[account(mut, seeds = [b"vault"], bump = vault.bump)]
     pub vault: Account<'info, Vault>,
-    /// CHECK: We verify the winner's account matches the selected winner
     #[account(mut)]
     pub winner: AccountInfo<'info>,
 }
@@ -222,15 +221,45 @@ pub enum ErrorCode {
     VaultEmpty,
     #[msg("Invalid winner.")]
     InvalidWinner,
+    #[msg("No winner.")]
+    NoWinner,
 }
 
 // Helper Functions
 fn select_winner(contributors: &Vec<Contributor>) -> Result<Pubkey> {
     if contributors.is_empty() {
-        return Err(ErrorCode::VaultEmpty.into());
+        return Err(ErrorCode::NoWinner.into());
     }
-    // For testing, always select the first contributor
-    Ok(contributors[0].address)
+
+    // Get the current block timestamp as a source of randomness
+    let current_timestamp = Clock::get()?.unix_timestamp;
+
+    // Create a hash from the current timestamp
+    let hash_result = hash(&current_timestamp.to_be_bytes());
+
+    // Convert the hash result into a large integer for random selection
+    let random_number = u64::from_le_bytes(hash_result.to_bytes()[..8].try_into().unwrap());
+
+    // Sort contributors by amount in descending order
+    let mut sorted_contributors = contributors.clone();
+    sorted_contributors.sort_by(|a, b| b.amount.cmp(&a.amount));
+
+    // Calculate weighted chances based on their contributions
+    let total_contributors = sorted_contributors.len();
+    let mut weighted_contributors: VecDeque<Pubkey> = VecDeque::new();
+
+    let mut weight = total_contributors as u64;
+    for contrib in sorted_contributors.iter() {
+        let chances = if weight > 0 { weight } else { 1 };
+        for _ in 0..chances {
+            weighted_contributors.push_back(contrib.address);
+        }
+        weight /= 2; // Reduce the chances by half for the next contributor
+    }
+
+    // Select a winner based on the random number and the weighted contributors
+    let winner_index = (random_number as usize) % weighted_contributors.len();
+    Ok(weighted_contributors[winner_index])
 }
 
 fn log_probabilities(contributors: &Vec<Contributor>) -> Result<()> {
